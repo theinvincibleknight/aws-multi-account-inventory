@@ -55,7 +55,7 @@ case $User_Input in
 
         echo "###################################################################"
         echo "[[[  Building Docker image  ]]]"
-        docker image build --no-cache -t $Local_Img_Tag .
+        docker image build --no-cache --provenance=false -t $Local_Img_Tag .
         echo "###################################################################"
         echo ""
 
