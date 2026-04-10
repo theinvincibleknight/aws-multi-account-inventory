@@ -1,0 +1,10 @@
+.git
+.gitignore
+LICENSE
+README.md
+deploy.sh
+*.xlsx
+__pycache__
+*.pyc
+.dockerignore
+Dockerfile

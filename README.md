@@ -1,330 +1,149 @@
-# AWS Complete Inventory Script
+# AWS Multi-Account Inventory Lambda
 
-Comprehensive Python script to collect AWS inventory across 50+ services and export to Excel.
+Docker-based Lambda function that fetches inventory from multiple AWS accounts, generates Excel reports, and stores them in S3.
 
-## 🎯 How It Works: Two Scripts
+## Architecture
 
-### Script 1: `fetch_aws_services.py` (Service Discovery)
-Discovers which AWS services you're actually using by querying Cost Explorer (last 90 days) and saves them to `aws_services.txt`.
+```
+SSM Parameter Store          Lambda (Container)                 S3 Bucket
+┌─────────────────┐    ┌──────────────────────┐    ┌─────────────────────────┐
+│ /fetch_inv/      │───>│                      │───>│ bucket/                 │
+│   dev-access-key │    │  For each env:       │    │   2026/                 │
+│   dev-secret-key │    │   1. Get creds (SSM) │    │     03/                 │
+│   uat-access-key │    │   2. Fetch inventory │    │       AcctName_dev_...  │
+│   uat-secret-key │    │   3. Generate Excel  │    │       AcctName_uat_...  │
+│   prod-access-key│    │   4. Upload to S3    │    │       AcctName_prod_... │
+│   prod-secret-key│    │                      │    │                         │
+└─────────────────┘    └──────────────────────┘    └─────────────────────────┘
+```
 
-### Script 2: `aws_inventory_dynamic.py` (Inventory Collection)
-Reads `aws_services.txt` and collects detailed inventory for those services, plus core services (EC2, VPC, S3, IAM).
+## Prerequisites (Create Manually)
 
-### Important: Script Relationship
+1. **ECR Repository** — to store the Docker image
+2. **Lambda Function** — container image type, with these settings:
+   - Timeout: 900 seconds (15 min)
+   - Memory: 512 MB+
+   - Environment variables:
 
-The two scripts work together but have a limitation:
+     | Variable     | Example             | Description                       |
+     |--------------|---------------------|-----------------------------------|
+     | S3_BUCKET    | my-inventory-bucket | S3 bucket for reports             |
 
-1. `fetch_aws_services.py` discovers services and saves to `aws_services.txt` with account info
-2. `aws_inventory_dynamic.py` reads `aws_services.txt` and maps service names to fetch functions
-3. **LIMITATION**: If a NEW service is added to your AWS account:
-   - Step 1 will detect it and add to `aws_services.txt` ✓
-   - Step 2 will try to map it using `SERVICE_NAME_MAPPING` dictionary
-   - **BUT** if there's no fetch function for that service, it will be skipped ⚠
-   - You'll need to add a new fetch function in `aws_inventory_dynamic.py` for that service
+3. **S3 Bucket** — for storing Excel reports
+4. **SSM Parameters** (SecureString) — credentials for each target account:
 
-**Example**: If AWS launches a new service "AWS NewService" and you start using it:
-- `fetch_aws_services.py` will list it in `aws_services.txt`
-- `aws_inventory_dynamic.py` will show: `⚠ AWS NewService -> (not yet supported)`
-- You'll need to add a `fetch_newservice()` function and update `SERVICE_NAME_MAPPING`
-
-**Workaround**: The script always fetches core services (EC2, VPC, S3, IAM, etc.) even if not in the file, so you'll still get a comprehensive inventory of common services.
-
-## Prerequisites
-
-1. **Python 3.7+** installed
-2. **AWS credentials** configured with **ReadOnlyAccess** or equivalent read permissions
-3. **Required packages**:
    ```bash
-   pip install -r requirements.txt
+   # Dev account
+   aws ssm put-parameter --name "/fetch_inv/dev-access-key"  --value "AKIA..." --type SecureString
+   aws ssm put-parameter --name "/fetch_inv/dev-secret-key"  --value "wJal..." --type SecureString
+
+   # UAT account
+   aws ssm put-parameter --name "/fetch_inv/uat-access-key"  --value "AKIA..." --type SecureString
+   aws ssm put-parameter --name "/fetch_inv/uat-secret-key"  --value "wJal..." --type SecureString
+
+   # Prod account
+   aws ssm put-parameter --name "/fetch_inv/prod-access-key" --value "AKIA..." --type SecureString
+   aws ssm put-parameter --name "/fetch_inv/prod-secret-key" --value "wJal..." --type SecureString
    ```
 
-## AWS Permissions Required
+   The full SSM paths are defined in the `ACCOUNTS` dict at the top of `lambda_function.py`. To add a new account, just add a new entry there with its SSM paths:
 
-Your AWS IAM user/role needs **ReadOnlyAccess** managed policy or equivalent read permissions for all services.
+   ```python
+   ACCOUNTS = {
+       'dev': {
+           'access_key_ssm': '/fetch_inv/dev-access-key',
+           'secret_key_ssm': '/fetch_inv/dev-secret-key',
+       },
+       'uat': {
+           'access_key_ssm': '/fetch_inv/uat-access-key',
+           'secret_key_ssm': '/fetch_inv/uat-secret-key',
+       },
+       'prod': {
+           'access_key_ssm': '/fetch_inv/prod-access-key',
+           'secret_key_ssm': '/fetch_inv/prod-secret-key',
+       },
+       # Add new accounts here
+   }
+   ```
 
-Minimum permissions:
-- All `Describe*`, `List*`, `Get*` actions for services you want to inventory
-- `ce:GetCostAndUsage` for service discovery (Step 1)
-- `sts:GetCallerIdentity` for account info
-- `iam:ListAccountAliases` for account name (optional)
+5. **Lambda IAM Role** — Lambda will create a basic execution role by default (CloudWatch Logs). Add the following as an inline policy to that role for SSM and S3 access:
 
-## Quick Start
+   ```json
+   {
+     "Version": "2012-10-17",
+     "Statement": [
+       {
+         "Sid": "SSMReadCredentials",
+         "Effect": "Allow",
+         "Action": [
+           "ssm:GetParameter"
+         ],
+         "Resource": "arn:aws:ssm:*:*:parameter/fetch_inv/*"
+       },
+       {
+         "Sid": "S3UploadReports",
+         "Effect": "Allow",
+         "Action": [
+           "s3:PutObject"
+         ],
+         "Resource": "arn:aws:s3:::YOUR_BUCKET_NAME/*"
+       }
+     ]
+   }
+   ```
+
+   Replace `YOUR_BUCKET_NAME` with your actual S3 bucket name.
+
+   Target account IAM users (whose keys are stored in SSM) need **ReadOnlyAccess** policy attached.
+
+## Deploy
+
+On a Linux machine with Docker and AWS CLI:
 
 ```bash
-# 1. Install dependencies (first time only)
-pip install -r requirements.txt
-
-# 2. Discover services (creates aws_services.txt with account info)
-python fetch_aws_services.py
-
-# 3. Collect inventory (creates Excel file with account name)
-python aws_inventory_dynamic.py
-
-# Or use the batch/shell script to run both:
-# Windows:
-run.bat
-
-# Linux/Mac:
-chmod +x run.sh
-./run.sh
+git clone <repo-url>
+cd <repo>
+chmod +x deploy.sh
+sh deploy.sh 1.0.0
 ```
 
-### Output Files:
-- `aws_services.txt` - List of services with account number and name
-- `AWS_Inventory_<AccountName>_YYYYMMDD_HHMMSS.xlsx` - Excel file with inventory
-  - Each AWS service in a separate sheet (50+ sheets)
-  - Scans all AWS regions automatically
-  - Takes 10-20 minutes depending on resources
+The script will:
+1. `git fetch --all` and checkout the given tag
+2. Show git status and ask for confirmation
+3. Login to ECR, build image, push to ECR
+4. Update the Lambda function with the new image
 
-## Services Collected (50+)
+ECR repo, Lambda function name, and region are hardcoded in `deploy.sh` — update them once to match your setup.
 
-### Compute
-- **EC2 Instances** - All instances with IPs, volumes, security groups
-- **EBS Volumes** - All volumes with size, type, attachments
-- **ECS Clusters** - Clusters with task counts
-- **ECS Services** - Services with desired/running counts
-- **ECR Repositories** - Container repositories
-- **Lambda Functions** - Functions with runtime, VPC config
-- **Elastic IPs** - All Elastic IPs
-- **Key Pairs** - EC2 key pairs
-- **ENI** - Elastic Network Interfaces
+## Run
 
-### Storage
-- **S3 Buckets** - Buckets with region, access level
-- **EFS** - File systems
+```bash
+# Invoke with defaults (uses env vars on Lambda)
+aws lambda invoke --function-name aws-inventory-collector output.json
 
-### Database
-- **RDS Instances** - Databases with engine, endpoint
-- **DynamoDB Tables** - Tables with item counts
-- **DAX Clusters** - DynamoDB Accelerator clusters
-- **ElastiCache** - Redis/Memcached clusters
-- **OpenSearch** - OpenSearch domains
-
-### Networking
-- **VPCs** - VPCs with CIDR blocks
-- **Subnets** - Subnets with availability zones
-- **Security Groups** - All security groups
-- **Load Balancers** - ALB/NLB with DNS names
-- **Route53** - Hosted zones
-- **CloudFront** - Distributions
-- **API Gateway** - REST APIs
-- **VPC Endpoints** - VPC endpoints
-- **Internet Gateways** - IGWs
-- **NAT Gateways** - NAT gateways
-- **Transit Gateways** - TGWs
-- **Direct Connect** - Direct Connect connections
-
-### Security & Identity
-- **IAM Users** - All IAM users
-- **IAM Roles** - All IAM roles
-- **IAM Policies** - Customer managed policies
-- **KMS Keys** - Encryption keys
-- **Secrets Manager** - Secrets
-- **ACM Certificates** - SSL/TLS certificates
-- **WAF** - Web Application Firewall rules
-- **Cognito User Pools** - User pools
-- **Cognito Identity Pools** - Identity pools
-
-### Management & Governance
-- **CloudFormation** - Stacks with status
-- **CloudTrail** - Trails
-- **CloudWatch Alarms** - All alarms
-- **CloudWatch Log Groups** - Log groups
-- **EventBridge Rules** - Event rules
-- **Config Rules** - Config rules
-- **SSM Parameters** - Systems Manager parameters
-- **AWS Backup** - Backup plans and vaults
-
-### Application Integration
-- **SNS Topics** - All topics
-- **SQS Queues** - All queues
-- **Step Functions** - State machines
-- **MQ** - Message brokers
-- **Kafka (MSK)** - Managed Kafka clusters
-- **SES** - Email identities
-
-### Analytics & ML
-- **Glue Databases** - Glue databases
-- **Glue Jobs** - ETL jobs
-- **SageMaker** - Notebook instances
-- **Kinesis** - Data streams
-- **Redshift** - Data warehouse clusters
-
-### Developer Tools
-- **CodeBuild** - Build projects
-- **CodePipeline** - CI/CD pipelines
-
-### Monitoring
-- **Grafana** - Managed Grafana workspaces
-- **Prometheus** - Managed Prometheus workspaces
-- **MWAA (Airflow)** - Managed Airflow environments
-
-## Script Structure
-
-The script is organized in 3 sections:
-
-1. **Helper Functions** - Datetime conversion, file handling, account info
-2. **Service Fetchers** - Individual fetch function for each AWS service (50+ functions)
-3. **Main Execution** - Orchestrates collection and export
-
-## Files
-
-- `fetch_aws_services.py` - Service discovery script (Step 1)
-- `aws_inventory_dynamic.py` - Main inventory collection script (Step 2)
-- `aws_services.txt` - Generated list of services with account info
-- `requirements.txt` - Python dependencies (boto3, pandas, openpyxl)
-- `run.bat` - Quick run batch file
-- `README.md` - This file
-
-## Troubleshooting
-
-### "NoCredentialsError"
-- Run `aws configure` to set up credentials
-- Or set environment variables (see above)
-
-### "Access Denied"
-- Ensure your IAM user has **ReadOnlyAccess** managed policy or equivalent read permissions
-- For service discovery, you also need `ce:GetCostAndUsage` permission
-
-### Missing Resources
-- Check if resources exist in the regions being scanned
-- Verify IAM permissions for that specific service
-- Some services are region-specific (e.g., S3 is global, EC2 is regional)
-
-### Script is Slow
-- Normal behavior - scans all regions for all services
-- Expected time: 10-20 minutes
-- Faster on accounts with fewer resources
-
-## Performance
-
-- **Small account** (< 100 resources): 5-10 minutes
-- **Medium account** (100-1000 resources): 10-15 minutes
-- **Large account** (1000+ resources): 15-25 minutes
-
-## Files
-
-- `fetch_aws_services.py` - Service discovery script (Step 1)
-- `aws_inventory_dynamic.py` - Main inventory collection script (Step 2)
-- `aws_services.txt` - Generated list of services with account info (created by Step 1)
-- `requirements.txt` - Python dependencies (boto3, pandas, openpyxl)
-- `run.bat` - Quick run batch file for Windows
-- `run.sh` - Quick run shell script for Linux/Mac
-- `README.md` - This file
-
-## Example Output
-
-### aws_services.txt (after Step 1):
-```
-# AWS Account: 123456789012
-# Account Name: production-account
-# Generated: 2026-02-25 14:30:00
-# Total Services: 35
-#
-# Services discovered from Cost Explorer (last 90 days):
-#======================================================================
-
-AWS Lambda
-Amazon Elastic Compute Cloud - Compute
-Amazon Simple Storage Service
-Amazon Relational Database Service
-...
+# Invoke specific environments only
+aws lambda invoke --function-name aws-inventory-collector \
+  --payload '{"environments": ["dev"]}' output.json
 ```
 
-### Excel File (after Step 2):
-Filename: `AWS_Inventory_production-account_20260225_143000.xlsx`
+## S3 Output
 
 ```
-Summary:
-  EC2_Instances: 24 resources
-  EBS_Volumes: 45 resources
-  ECS_Clusters: 7 resources
-  ECS_Services: 21 resources
-  ECR_Repositories: 12 resources
-  Lambda: 51 resources
-  S3: 58 resources
-  RDS: 3 resources
-  DynamoDB: 15 resources
-  ElastiCache: 2 resources
-  OpenSearch: 1 resources
-  VPC: 18 resources
-  Subnets: 74 resources
-  Security_Groups: 68 resources
-  Load_Balancers: 16 resources
-  Route53: 5 resources
-  CloudFront: 3 resources
-  API_Gateway: 8 resources
-  CloudFormation: 100 resources
-  CloudTrail: 2 resources
-  CloudWatch_Alarms: 200 resources
-  CloudWatch_Log_Groups: 150 resources
-  EventBridge: 115 resources
-  KMS_Keys: 25 resources
-  Secrets_Manager: 18 resources
-  ACM_Certificates: 12 resources
-  SNS_Topics: 10 resources
-  SQS_Queues: 8 resources
-  SSM_Parameters: 1000 resources
-  Config_Rules: 25 resources
-  Glue_Jobs: 200 resources
-  IAM_Users: 4 resources
-  IAM_Roles: 909 resources
-  IAM_Policies: 257 resources
-
-Total: 3500+ resources
+s3://bucket/
+  2026/
+    03/
+      production_dev_20260327_060000.xlsx
+      staging_uat_20260327_060000.xlsx
 ```
 
-## Notes
+Each Excel file has 40+ sheets covering EC2, EBS, ECS, Lambda, S3, RDS, DynamoDB, VPC, IAM, and many more services.
 
-- Script scans all enabled AWS regions by default
-- Each service is exported to a separate Excel sheet
-- Serial numbers (Sr. No.) are included for easy reference
-- Errors in one service don't stop collection of other services
-- All timestamps are converted to readable format (no timezone issues)
-- Handles missing fields gracefully (shows 'N/A')
+## Optional: Schedule with EventBridge
 
-## Support
+Run monthly on the 1st at 6 AM UTC:
 
-For issues or questions:
-1. Check AWS credentials are configured correctly (`aws sts get-caller-identity`)
-2. Verify IAM permissions - need **ReadOnlyAccess** or equivalent
-3. For service discovery issues, ensure Cost Explorer is enabled and you have `ce:GetCostAndUsage` permission
-4. Check the console output for specific error messages
-5. Ensure Python 3.7+ and all dependencies are installed
-
-## Adding New Services
-
-If you need to add support for a new AWS service:
-
-1. Add service name mapping in `SERVICE_NAME_MAPPING` dictionary
-2. Create a new `fetch_<service>()` function following the existing pattern
-3. Add the service to the main execution logic in `main()` function
-4. Use paginators for API calls that return lists (see existing examples)
-5. Always include error handling and logging
-
-Example:
-```python
-def fetch_new_service(session, regions):
-    """Fetch New Service resources"""
-    logger.info("Fetching New Service...")
-    all_resources = []
-    serial_number = 1
-    
-    for region in regions:
-        try:
-            client = session.client('newservice', region_name=region)
-            paginator = client.get_paginator('list_resources')
-            
-            for page in paginator.paginate():
-                for resource in page['Resources']:
-                    all_resources.append({
-                        'Sr. No.': serial_number,
-                        'Name': resource['Name'],
-                        'Region': region
-                    })
-                    serial_number += 1
-        except Exception as e:
-            logger.error(f"Error fetching New Service in {region}: {e}")
-    
-    return all_resources
+```bash
+aws events put-rule --name monthly-inventory --schedule-expression "cron(0 6 1 * ? *)"
+aws events put-targets --rule monthly-inventory \
+  --targets "Id"="1","Arn"="arn:aws:lambda:REGION:ACCOUNT:function:aws-inventory-collector"
 ```
