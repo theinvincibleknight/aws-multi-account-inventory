@@ -47,6 +47,18 @@ ACCOUNTS = {
         'access_key_ssm': '/fetch_inv/prod-access-key',
         'secret_key_ssm': '/fetch_inv/prod-secret-key',
     },
+    'oldprod': {
+        'access_key_ssm': '/fetch_inv/oldprod-access-key',
+        'secret_key_ssm': '/fetch_inv/oldprod-secret-key',
+    },
+    'network': {
+        'access_key_ssm': '/fetch_inv/network-access-key',
+        'secret_key_ssm': '/fetch_inv/network-secret-key',
+    },
+    'sharedservice': {
+        'access_key_ssm': '/fetch_inv/sharedservice-access-key',
+        'secret_key_ssm': '/fetch_inv/sharedservice-secret-key',
+    },
 }
 
 
