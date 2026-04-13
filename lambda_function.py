@@ -27,7 +27,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Configuration
-S3_BUCKET = os.environ.get('S3_BUCKET', 'aws-inventory-reports')
+S3_BUCKET = os.environ.get('S3_BUCKET', 'aws-inventory-collector')
 
 # ============================================================================
 # ACCOUNT DEFINITIONS
