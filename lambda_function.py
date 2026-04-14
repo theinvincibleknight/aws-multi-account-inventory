@@ -27,7 +27,7 @@ logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # Configuration
-S3_BUCKET = os.environ.get('S3_BUCKET', 'aws-inventory-reports')
+S3_BUCKET = os.environ.get('S3_BUCKET', 'aws-inventory-collector')
 
 # ============================================================================
 # ACCOUNT DEFINITIONS
@@ -1225,9 +1225,9 @@ def lambda_handler(event, context):
             # Generate Excel in memory
             buffer = export_to_excel_buffer(data)
 
-            # S3 key: year/month/AccountName_env_YYYYMMDD_HHMMSS.xlsx
+            # S3 key: inventory/year/month/AccountName_env_YYYYMMDD_HHMMSS.xlsx
             s3_key = (
-                f"{now.strftime('%Y')}/{now.strftime('%m')}/"
+                f"inventory/{now.strftime('%Y')}/{now.strftime('%m')}/"
                 f"{account_name}_{env}_{now.strftime('%Y%m%d_%H%M%S')}.xlsx"
             )
 
