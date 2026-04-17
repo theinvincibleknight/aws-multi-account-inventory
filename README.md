@@ -4,22 +4,126 @@ Docker-based Lambda function that fetches inventory from multiple AWS accounts u
 
 ## Architecture
 
+### High-Level Overview
+
+```mermaid
+graph LR
+    subgraph Central Account
+        SSM[("SSM Parameter Store<br/>/fetch_inv/*")]
+        ECR[("ECR Repository<br/>aws-inventory-collector")]
+        Lambda["Lambda Function<br/>(Container Image)"]
+        S3[("S3 Bucket<br/>aws-inventory-collector")]
+        CW[("CloudWatch Logs")]
+    end
+
+    subgraph Target Accounts
+        DEV["Dev Account"]
+        UAT["UAT Account"]
+        PROD["Prod Account"]
+        OLDPROD["Old Prod Account"]
+        NET["Network Account"]
+        SS["Shared Service Account"]
+    end
+
+    SSM -- "1. Read credentials" --> Lambda
+    ECR -- "Container image" --> Lambda
+    Lambda -- "2. Fetch inventory<br/>(ReadOnlyAccess)" --> DEV
+    Lambda -- "2. Fetch inventory" --> UAT
+    Lambda -- "2. Fetch inventory" --> PROD
+    Lambda -- "2. Fetch inventory" --> OLDPROD
+    Lambda -- "2. Fetch inventory" --> NET
+    Lambda -- "2. Fetch inventory" --> SS
+    Lambda -- "3. Upload Excel" --> S3
+    Lambda -- "Logs" --> CW
 ```
-SSM Parameter Store              Lambda (Container Image)                S3 Bucket
-┌──────────────────────┐    ┌──────────────────────────┐    ┌──────────────────────────────┐
-│ /fetch_inv/           │───>│                          │───>│ aws-inventory-collector/      │
-│   dev-access-key      │    │  For each environment:   │    │   inventory/                  │
-│   dev-secret-key      │    │   1. Read creds from SSM │    │     2026/                     │
-│   uat-access-key      │    │   2. Fetch all resources │    │       04/                     │
-│   uat-secret-key      │    │   3. Generate Excel      │    │         AcctName_dev_...xlsx  │
-│   prod-access-key     │    │   4. Upload to S3        │    │         AcctName_uat_...xlsx  │
-│   prod-secret-key     │    │                          │    │         AcctName_prod_...xlsx │
-│   oldprod-access-key  │    └──────────────────────────┘    └──────────────────────────────┘
-│   oldprod-secret-key  │
-│   network-access-key  │
-│   network-secret-key  │
-│   sharedservice-...   │
-└──────────────────────┘
+
+### Deployment Flow
+
+```mermaid
+sequenceDiagram
+    participant Dev as Developer<br/>(Linux Machine)
+    participant Git as Git Repository
+    participant Docker as Docker Engine
+    participant ECR as AWS ECR
+    participant Lambda as AWS Lambda
+
+    Dev->>Git: sh deploy.sh 1.0.9
+    Git-->>Dev: git fetch --all
+    Git-->>Dev: git checkout 1.0.9
+    Dev->>Dev: Confirm (yes/no)
+    Dev->>ECR: aws ecr get-login-password
+    ECR-->>Dev: Login Succeeded
+    Dev->>Docker: docker build --provenance=false
+    Docker-->>Dev: Image built
+    Dev->>ECR: docker push
+    ECR-->>Dev: Image pushed
+    Dev->>Lambda: aws lambda update-function-code
+    Lambda-->>Dev: Function updated
+```
+
+### Inventory Collection Flow (Per Invocation)
+
+```mermaid
+flowchart TD
+    A["Lambda Invoked<br/>{'environments': ['dev']}"] --> B["Read SSM Parameters<br/>/fetch_inv/dev-access-key<br/>/fetch_inv/dev-secret-key"]
+    B --> C["Create boto3 Session<br/>for target account"]
+    C --> D["Get Account Info<br/>(ID + Alias)"]
+    D --> E["Get All Enabled Regions<br/>(~20+ regions)"]
+    E --> F["Fetch 40+ Services"]
+
+    F --> G["Compute<br/>EC2, EBS, ECS, ECR, Lambda"]
+    F --> H["Storage<br/>S3, EFS"]
+    F --> I["Database<br/>RDS, DynamoDB, ElastiCache, OpenSearch"]
+    F --> J["Networking<br/>VPC, Subnets, SGs, LBs, Route53, CloudFront..."]
+    F --> K["Security<br/>KMS, Secrets, ACM, WAF"]
+    F --> L["Management<br/>CFN, CloudTrail, CloudWatch, EventBridge"]
+    F --> M["Others<br/>SNS, SQS, Glue, IAM, Cognito..."]
+
+    G --> N["Generate Excel<br/>(in-memory BytesIO)"]
+    H --> N
+    I --> N
+    J --> N
+    K --> N
+    L --> N
+    M --> N
+
+    N --> O["Upload to S3<br/>s3://aws-inventory-collector/<br/>inventory/2026/04/<br/>AcctName_dev_20260414_060000.xlsx"]
+    O --> P["Return Summary<br/>{status, total_resources, s3_path}"]
+```
+
+### S3 Output Structure
+
+```mermaid
+graph TD
+    S3["s3://aws-inventory-collector"] --> INV["inventory/"]
+    INV --> Y2026["2026/"]
+    Y2026 --> M04["04/"]
+    M04 --> F1["production_dev_20260414_060000.xlsx"]
+    M04 --> F2["staging_uat_20260414_060000.xlsx"]
+    M04 --> F3["myaccount_prod_20260414_060000.xlsx"]
+    Y2026 --> M05["05/"]
+    M05 --> F4["production_dev_20260501_060000.xlsx"]
+    M05 --> F5["..."]
+```
+
+### IAM & Permissions
+
+```mermaid
+graph TD
+    subgraph Central Account - Lambda Role
+        LP1["ssm:GetParameter<br/>arn:aws:ssm:*:*:parameter/fetch_inv/*"]
+        LP2["s3:PutObject<br/>arn:aws:s3:::aws-inventory-collector/*"]
+        LP3["logs:CreateLogGroup<br/>logs:CreateLogStream<br/>logs:PutLogEvents"]
+    end
+
+    subgraph Target Accounts - IAM Users
+        TP1["AWS Managed Policy:<br/>ReadOnlyAccess"]
+    end
+
+    Lambda["Lambda Function"] --> LP1
+    Lambda --> LP2
+    Lambda --> LP3
+    Lambda -- "Uses access/secret keys" --> TP1
 ```
 
 ## Prerequisites (Create Manually)
@@ -143,7 +247,7 @@ sh deploy.sh <tag>
 
 Example:
 ```bash
-sh deploy.sh 1.0.9
+sh deploy.sh 1.0.0
 ```
 
 The script will:
